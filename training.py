@@ -436,7 +436,7 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
 
 
 def test(helper, epoch, data_source,
-         model, is_poison=False, visualize=True):
+         model, is_poison=False, visualize=False):
     model.eval()
     total_loss = 0
     correct = 0
@@ -512,7 +512,7 @@ def test(helper, epoch, data_source,
 
 
 def test_poison(helper, epoch, data_source,
-                model, is_poison=False, visualize=True):
+                model, is_poison=False, visualize=False):
     model.eval()
     total_loss = 0.0
     correct = 0.0
@@ -675,12 +675,12 @@ if __name__ == '__main__':
                                                     epoch=epoch,
                                                     data_source=helper.test_data_poison,
                                                     model=helper.target_model, is_poison=True,
-                                                    visualize=True)
+                                                    visualize=False)
             mean_acc.append(epoch_acc_p)
             results['poison'].append({'epoch': epoch, 'acc': epoch_acc_p})
 
         epoch_loss, epoch_acc = test(helper=helper, epoch=epoch, data_source=helper.test_data,
-                                     model=helper.target_model, is_poison=False, visualize=True)
+                                     model=helper.target_model, is_poison=False, visualize=False)
 
 
         helper.save_model(epoch=epoch, val_loss=epoch_loss)
