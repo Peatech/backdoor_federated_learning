@@ -35,7 +35,18 @@ criterion = torch.nn.CrossEntropyLoss()
 # random.seed(1)
 
 def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, last_weight_accumulator=None):
+    """
+    Train function for federated learning with optional backdoor attack simulation.
 
+    Parameters:
+    - helper: Helper class instance for utility functions.
+    - epoch: Current training epoch.
+    - train_data_sets: List of training datasets for each participant.
+    - local_model: Local model instance for individual training.
+    - target_model: Global model instance for aggregating weights.
+    - is_poison: Boolean indicating if the current training is poisoned.
+    - last_weight_accumulator: Weight accumulator from the previous round, if any.
+    """
     ### Accumulate weights for all participants.
     weight_accumulator = dict()
     for name, data in target_model.state_dict().items():
@@ -44,19 +55,22 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
             continue
         weight_accumulator[name] = torch.zeros_like(data)
 
-    ### This is for calculating distances
+    ### Initialize parameters for calculating model distance. This is for calculating distances
     target_params_variables = dict()
+    # Clone parameters to calculate the distance from the global model
     for name, param in target_model.named_parameters():
         target_params_variables[name] = target_model.state_dict()[name].clone().detach().requires_grad_(False)
     current_number_of_adversaries = 0
+
     for model_id, _ in train_data_sets:
         if model_id == -1 or model_id in helper.params['adversary_list']:
             current_number_of_adversaries += 1
     logger.info(f'There are {current_number_of_adversaries} adversaries in the training.')
 
+    # Iterate over each participant model
     for model_id in range(helper.params['no_models']):
         model = local_model
-        ## Synchronize LR and models
+        # Copy parameters from the global model to synchronize. Synchronize LR and models
         model.copy_params(target_model.state_dict())
         optimizer = torch.optim.SGD(model.parameters(), lr=helper.params['lr'],
                                     momentum=helper.params['momentum'],
@@ -64,6 +78,8 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
         model.train()
 
         start_time = time.time()
+
+        # Load data based on the model type (text or image)
         if helper.params['type'] == 'text':
             current_data_model, train_data = train_data_sets[model_id]
             ntokens = len(helper.corpus.dictionary)
@@ -71,24 +87,29 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
         else:
             _, (current_data_model, train_data) = train_data_sets[model_id]
         batch_size = helper.params['batch_size']
+        # If participant is compromised (poisoned), skip training and continue
         ### For a 'poison_epoch' we perform single shot poisoning
 
         if current_data_model == -1:
             ### The participant got compromised and is out of the training.
             #  It will contribute to poisoning,
             continue
+        
+        # Check if the current participant should poison the training
         if is_poison and current_data_model in helper.params['adversary_list'] and \
                 (epoch in helper.params['poison_epochs'] or helper.params['random_compromise']):
             logger.info('poison_now')
-            poisoned_data = helper.poisoned_data_for_train
+            poisoned_data = helper.poisoned_data_for_train        # Use poisoned data for training
 
+            # Evaluate initial accuracy on both clean and poisoned data
             _, acc_p = test_poison(helper=helper, epoch=epoch,
                                    data_source=helper.test_data_poison,
                                    model=model, is_poison=True, visualize=False)
             _, acc_initial = test(helper=helper, epoch=epoch, data_source=helper.test_data,
                              model=model, is_poison=False, visualize=False)
             logger.info(acc_p)
-            poison_lr = helper.params['poison_lr']
+            # Adjust poison learning rate based on accuracy levels       
+            poison_lr = helper.params['poison_lr']    
             if not helper.params['baseline']:
                 if acc_p > 20:
                     poison_lr /=50
@@ -97,7 +118,7 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
 
 
 
-
+            # Set retraining parameters and learning rate scheduler
             retrain_no_times = helper.params['retrain_poison']
             step_lr = helper.params['poison_step_lr']
 
@@ -117,7 +138,7 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
                 # fisher = helper.estimate_fisher(target_model, criterion, train_data,
                 #                                 12800, batch_size)
                 # helper.consolidate(local_model, fisher)
-
+                # Retrain with poisoned data for a specified number of epochs
                 for internal_epoch in range(1, retrain_no_times + 1):
                     if step_lr:
                         scheduler.step()
@@ -136,7 +157,7 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
                                 f" lr: {scheduler.get_lr()}")
                     # if internal_epoch>20:
                     #     data_iterator = train_data
-
+                    # Iterate through batches of poisoned data
                     for batch_id, batch in enumerate(data_iterator):
 
                         if helper.params['type'] == 'image':
@@ -153,6 +174,8 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
                         data, targets = helper.get_batch(poisoned_data, batch, False)
 
                         poison_optimizer.zero_grad()
+
+                        # Calculate classification loss based on model type
                         if helper.params['type'] == 'text':
                             hidden = helper.repackage_hidden(hidden)
                             output, hidden = model(data, hidden)
@@ -162,19 +185,21 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
                             output = model(data)
                             class_loss = nn.functional.cross_entropy(output, targets)
 
+                        # Compute distance-based loss for model regularization
                         all_model_distance = helper.model_dist_norm(target_model, target_params_variables)
                         norm = 2
                         distance_loss = helper.model_dist_norm_var(model, target_params_variables)
 
+                        # Combine classification and distance losses
                         loss = helper.params['alpha_loss'] * class_loss + (1 - helper.params['alpha_loss']) * distance_loss
 
-                        ## visualize
+                        ## Log and visualize training progress, if enabled
                         if helper.params['report_poison_loss'] and batch_id % 2 == 0:
                             loss_p, acc_p = test_poison(helper=helper, epoch=internal_epoch,
                                                         data_source=helper.test_data_poison,
                                                         model=model, is_poison=True,
                                                         visualize=False)
-
+                            # Visualize various metrics like classification loss and model distance
                             model.train_vis(vis=vis, epoch=internal_epoch,
                                             data_len=len(data_iterator),
                                             batch=batch_id,
@@ -210,14 +235,16 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
                                             eid=helper.params['environment_name'], name='Distance Loss',
                                             win='poison')
 
-
+                        # Backpropagate the combined loss
                         loss.backward()
-
+                        
+                        # Apply differential privacy (optional)
                         if helper.params['diff_privacy']:
                             torch.nn.utils.clip_grad_norm(model.parameters(), helper.params['clip'])
                             poison_optimizer.step()
 
                             model_norm = helper.model_dist_norm(model, target_params_variables)
+                            # Enforce model norms if exceeding the threshold
                             if model_norm > helper.params['s_norm']:
                                 logger.info(
                                     f'The limit reached for distance: '
@@ -238,6 +265,8 @@ def train(helper, epoch, train_data_sets, local_model, target_model, is_poison, 
                             poison_optimizer.step()
                         else:
                             poison_optimizer.step()
+                    
+                    # Test model on both clean and poisoned data after retraining
                     loss, acc = test(helper=helper, epoch=epoch, data_source=helper.test_data,
                                      model=model, is_poison=False, visualize=False)
                     loss_p, acc_p = test_poison(helper=helper, epoch=internal_epoch,
